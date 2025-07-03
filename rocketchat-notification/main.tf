@@ -1,11 +1,7 @@
-provider "aws" {
-  region = var.aws_region
-}
-
 locals {
   //Put all common tags here
   common_tags = {
-    Project = "Security Notifications"
+    Project = "BCGOV_LZA_SecurityHub_Notifications"
   }
   lambda_src_path = "./lambda"
 }
@@ -13,7 +9,7 @@ locals {
 data "aws_caller_identity" "current" {}
 
 resource "aws_iam_role" "security_hub_notifications_role" {
-  name               = "security_hub_notifications_role"
+  name               = "BCGOV_LZA_Security_Hub_Notifications_Role"
   path               = "/service-role/"
   assume_role_policy = <<EOF
 {
@@ -95,19 +91,19 @@ data "archive_file" "lambda_source_package" {
 # Lambda
 resource "aws_lambda_function" "findings_to_teams_rocketchat" {
   filename         = data.archive_file.lambda_source_package.output_path
-  function_name    = "sea-send-securityhubfindings-to-rocketchat-teams"
+  function_name    = "BCGOV_LZA-SecurityHubfindings-To-Rocketchat-Teams"
   role             = aws_iam_role.security_hub_notifications_role.arn
   handler          = "index.handler"
   description      = "Lambda Function to send security alerts to Rocketchat and Teams"
-  runtime          = "python3.8"
+  runtime          = "python3.12"
   timeout          = var.LambdaTimeout
   source_code_hash = data.archive_file.lambda_source_package.output_base64sha256
 
   environment {
     variables = {
       LOG_LEVEL = var.LambdaEnvLogLevel,
-      ParentId  = var.ParentId,
-      ParentId1 = var.ParentId1
+      core_account_ids = var.core_account_ids,
+      management_account_id = var.management_account_id
     }
   }
 
@@ -117,7 +113,7 @@ resource "aws_lambda_function" "findings_to_teams_rocketchat" {
 
 # CloudWatch Events Rules
 resource "aws_cloudwatch_event_rule" "security_hub_findings_to_teams_rocketchat" {
-  name        = "SecurityHubFindingsToteamsFromImport"
+  name        = "BCGOV_LZA_SecurityHubFindingsToRocketchatTeams"
   description = "CloudWatchEvents Rule to enable SecurityHub Findings to Teams"
 
   event_pattern = <<EOF
@@ -150,7 +146,7 @@ EOF
 
 resource "aws_cloudwatch_event_target" "findings_to_teams_rocketchat" {
   rule      = aws_cloudwatch_event_rule.security_hub_findings_to_teams_rocketchat.name
-  target_id = "FindingsToteams"
+  target_id = "FindingsToRocketchatTeams"
   arn       = aws_lambda_function.findings_to_teams_rocketchat.arn
 }
 
@@ -163,41 +159,41 @@ resource "aws_lambda_permission" "security_hub_findings_to_teams_rocketchat_even
   source_arn    = aws_cloudwatch_event_rule.security_hub_findings_to_teams_rocketchat.arn
 }
 
-resource "aws_lambda_permission" "security_hub_findings_to_teams_rocketchat_sns_lambda_invoke_permissions" {
-  statement_id  = "AllowExecutionFromSNS"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.findings_to_teams_rocketchat.function_name
-  principal     = "sns.amazonaws.com"
-  source_arn    = aws_sns_topic.alert_topic.arn
-}
+# resource "aws_lambda_permission" "security_hub_findings_to_teams_rocketchat_sns_lambda_invoke_permissions" {
+#   statement_id  = "AllowExecutionFromSNS"
+#   action        = "lambda:InvokeFunction"
+#   function_name = aws_lambda_function.findings_to_teams_rocketchat.function_name
+#   principal     = "sns.amazonaws.com"
+#   source_arn    = aws_sns_topic.alert_topic.arn
+# }
 
-# SNS Topic
-resource "aws_sns_topic" "alert_topic" {
-  name         = "rocketchat-teams-alerts"
-  display_name = "Rocketchat and Teams Alerts"
-  tags         = local.common_tags
-}
+# # SNS Topic
+# resource "aws_sns_topic" "alert_topic" {
+#   name         = "rocketchat-teams-alerts"
+#   display_name = "Rocketchat and Teams Alerts"
+#   tags         = local.common_tags
+# }
 
-resource "aws_sns_topic_policy" "default" {
-  arn    = aws_sns_topic.alert_topic.arn
-  policy = data.aws_iam_policy_document.sns_topic_policy.json
-}
+# resource "aws_sns_topic_policy" "default" {
+#   arn    = aws_sns_topic.alert_topic.arn
+#   policy = data.aws_iam_policy_document.sns_topic_policy.json
+# }
 
-data "aws_iam_policy_document" "sns_topic_policy" {
-  statement {
-    actions = [
-      "SNS:Publish"
-    ]
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["budgets.amazonaws.com"]
-    }
-    resources = [
-      aws_sns_topic.alert_topic.arn,
-    ]
-  }
-}
+# data "aws_iam_policy_document" "sns_topic_policy" {
+#   statement {
+#     actions = [
+#       "SNS:Publish"
+#     ]
+#     effect = "Allow"
+#     principals {
+#       type        = "Service"
+#       identifiers = ["budgets.amazonaws.com"]
+#     }
+#     resources = [
+#       aws_sns_topic.alert_topic.arn,
+#     ]
+#   }
+# }
 
 
 
@@ -244,7 +240,7 @@ resource "aws_iam_policy" "org_list_policy" {
       {
         Action   = "ssm:GetParameter"
         Effect   = "Allow"
-        Resource = "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/ecf/channels/webhooks"
+        Resource = "arn:aws:ssm:*:${data.aws_caller_identity.current.account_id}:parameter/lza/securityhubnotifications/webhooks"
         Sid      = "Allowssmgetparameter"
       }
     ]

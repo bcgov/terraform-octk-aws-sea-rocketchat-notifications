@@ -1,4 +1,2 @@
 jsonschema
-boto3
 requests
-botocore

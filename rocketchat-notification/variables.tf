@@ -13,11 +13,12 @@ variable "LambdaTimeout" {
   default = 30
 }
 
-variable "ParentId" {
-  type        = string
-  description = "Id of the security group"
+variable "core_account_ids" {
+  type    = string
+  description = "List of core account IDs to monitor for Security Hub findings"
 }
-variable "ParentId1" {
-  type        = string
-  description = "Id of the Infrastructure group"
+
+variable "management_account_id" {
+  type    = string
+  description = "The AWS account ID of the management account"
 }

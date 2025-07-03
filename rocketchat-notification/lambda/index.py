@@ -1,331 +1,161 @@
-import boto3
-import botocore
+# Secuirty Hub findings to teams and rocketchat
+
 import json
 import logging
-import requests
-import time
 import os
-import math
 import re
 import urllib.parse
-from os import environ
-from datetime import datetime
-from datetime import date
 
 import boto3
-ssm = boto3.client('ssm')
-parameter = ssm.get_parameter(Name='/ecf/channels/webhooks', WithDecryption=True)
-print(parameter['Parameter']['Value'])
-webHookUrlValues = parameter['Parameter']['Value']
-ParentId = os.getenv("ParentId")
-ParentId1 = os.getenv("ParentId1")
+import requests
 
-client = boto3.client("organizations", region_name="ca-central-1")
+AWS_REGION = os.getenv("AWS_REGION", "ca-central-1")
+LOG_LEVEL   = os.getenv("LOG_LEVEL", "INFO").upper()
+
+ssm = boto3.client("ssm")
+WEBHOOK_PARAMETER = "/lza/securityhubnotifications/webhooks"
+webHookUrlValues = ssm.get_parameter(Name=WEBHOOK_PARAMETER, WithDecryption=True)["Parameter"]["Value"]
+
+WEBHOOKS: dict[str, str] = {
+    key.strip().upper(): value.strip()
+    for key, value in (pair.split("=", 1) for pair in webHookUrlValues.split(","))
+}
 
 
-def setup_default_logging(request_id, level=logging.INFO):
-    """Creates the logging formatter.
+CORE_ACCOUNT_IDS = [account_id for account_id in os.getenv("core_account_ids", "").split(",") if account_id]
+MGMT_ACCOUNT_ID  = os.getenv("management_account_id", "")
+if MGMT_ACCOUNT_ID:
+    CORE_ACCOUNT_IDS.append(MGMT_ACCOUNT_ID)
 
-    Args:
-        request_id: (str) The id of the execution context (i.e. the Lambda execution ID).
-        level: logging level to use.
-    """
+def setup_logging(request_id: str) -> logging.Logger:
     logger = logging.getLogger()
-    console_handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "[%(levelname)s] %(asctime)s {0} [%(module)s:%(lineno)d]: %(message)s".format(
-            request_id
+    logger.handlers.clear()
+
+    fmt = "[%(levelname)-5s] %(asctime)s %(request_id)s  %(filename)s:%(lineno)d  %(message)s"
+    formatter = logging.Formatter(fmt, "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    h = logging.StreamHandler()
+    h.setFormatter(formatter)
+    logger.addHandler(h)
+
+    logging.LoggerAdapter(logger, extra={"request_id": request_id})
+    logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    return logging.LoggerAdapter(logger, {"request_id": request_id})
+
+def severity_label_colour(score: int) -> tuple[str, str]:
+    if   1 <= score <= 39:  return "LOW",       "#879596"
+    if  40 <= score <= 69:  return "MEDIUM",    "#ed7211"
+    if  70 <= score <= 89:  return "HIGH",      "#ed7211"
+    if  90 <= score <= 100: return "CRITICAL",  "#ff0209"
+    return "INFORMATIONAL", "#007cbc"
+
+
+def account_type(account_id: str, description: str) -> str:
+    """Classify a finding as *core* or *workload*."""
+    if account_id in CORE_ACCOUNT_IDS:
+        return "core"
+    # See if the description references a core account
+    match = re.findall(r"arn:aws:[^:]+:[^:]*:(\d{12})", description)
+    return "core" if match and match[-1] in CORE_ACCOUNT_IDS else "workload"
+
+
+def post(url: str, payload: dict):
+    requests.post(url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=5)
+
+
+def send_message(acct_type: str, teams_msg: dict, rocket_msg: dict):
+    key_prefix = acct_type.upper()
+    pairs = [("TEAMS", teams_msg), ("ROCKETCHAT", rocket_msg)]
+    for channel, payload in pairs:
+        url = WEBHOOKS.get(f"{channel}_{key_prefix}")
+        if url:
+            post(url, payload)
+        else:
+            logging.info("Webhook key %s_%s not configured", channel, key_prefix)
+
+def build_payloads(finding: dict, label: str, colour: str) -> tuple[dict, dict]:
+    account = finding["AwsAccountId"]
+    region  = finding["Resources"][0].get("Region", AWS_REGION)
+    fid     = finding["Id"]
+
+    console_base = f"https://{AWS_REGION}.console.aws.amazon.com/securityhub"
+    query = f"search=Id%3D%255Coperator%255C%253AEQUALS%255C%253A{urllib.parse.quote(fid, safe='')}"
+    console_link = f"{console_base}/home?region={region}#/findings?{query}"
+
+    rocket_attach = [{
+        "title": finding["Title"],
+        "title_link": console_link,
+        "text": finding["Description"],
+        "color": colour,
+        "ts": finding["UpdatedAt"],
+        "fields": [
+            {"title": "Severity",      "value": label,   "short": True},
+            {"title": "Region",        "value": region,  "short": True},
+            {"title": "Resource Type", "value": finding["Resources"][0]["Type"], "short": True},
+            {"title": "Last Seen",     "value": finding["UpdatedAt"],              "short": True},
+            {"title": "Finding Type",  "value": finding["Types"][0],               "short": True},
+        ],
+    }]
+    rocket = {
+        "text": f"*AWS SecurityHub finding in {region} for Acct: {account}*",
+        "attachments": rocket_attach,
+    }
+
+    teams = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": "0076D7",
+        "summary": console_link,
+        "sections": [{
+            "activityTitle": finding["Description"],
+            "activityImage": "https://logos-world.net/wp-content/uploads/2021/08/Amazon-Web-Services-AWS-Logo.png",
+            "activitySubtitle": f"*AWS SecurityHub finding in {region} for Acct: {account}*",
+            "facts": [
+                {"name": "Resource Type", "value": finding["Resources"][0]["Type"]},
+                {"name": "Last Seen",     "value": finding["UpdatedAt"]},
+                {"name": "Severity",      "value": label},
+                {"name": "Region",        "value": region},
+                {"name": "Finding Type",  "value": finding["Types"][0]},
+            ],
+            "markdown": True,
+        }],
+        "potentialAction": [{
+            "@type": "OpenUri",
+            "name": "Open in Security Hub",
+            "targets": [{"os": "default", "uri": console_link}],
+        }],
+    }
+    return rocket, teams
+
+def process_findings(detail: dict, logger: logging.LoggerAdapter):
+    findings = detail["findings"]
+    logger.info("Received %d Security Hub finding(s)", len(findings))
+    for finding in findings:
+        label, colour = severity_label_colour(finding["Severity"]["Normalized"])
+        acct_type_val = account_type(finding["AwsAccountId"], finding["Description"])
+        fid = finding["Id"][:12]
+        logger.info(
+            "Routing finding %s severity=%s account=%s dest=%s",
+            fid, label, finding["AwsAccountId"], acct_type_val.upper()
         )
-    )
-    console_handler.setFormatter(formatter)
 
-    # Get rid of any default handlers (Lambda apparently adds one).
-    logger.handlers = []
-    logger.addHandler(console_handler)
-    logger.setLevel(level)
-    return logger
-
+        rocket, teams = build_payloads(finding, label, colour)
+        send_message(acct_type_val, teams, rocket)
 
 def handler(event, context):
-
-    environ["request_id"] = context.aws_request_id
-    logger = setup_default_logging(environ["request_id"], environ["LOG_LEVEL"])
-    responseStatus = "SUCCESS"
-    reason = None
-    responseData = {}
-
-    result = {"StatusCode": "200", "Body": {"message": "success"}}
+    logger = setup_logging(context.aws_request_id)
+    logger.info("Raw event: %s", json.dumps(event)[:1000])
 
     try:
-        logging.getLogger().info(event)
+        if event.get("detail", {}).get("findings"):
+            process_findings(event["detail"], logger)
+        else:
+            logger.info("Non-Security Hub event ignored")
+            return {"statusCode": 202, "body": json.dumps({"message": "ignored"})}
 
-        request_type = event["RequestType"].upper() if (
-            "RequestType" in event) else ""
-        logging.getLogger().info(request_type)
+        logger.info("Processing complete")
+        return {"statusCode": 200, "body": json.dumps({"message": "processed"})}
 
-        if webHookUrlValues != None:
-            channels = webHookUrlValues.split(",")
-            webHookUrlLookup = {}
-
-            for channel in channels:
-                channelMap = channel.split("=")
-                webHookUrlLookup[channelMap[0]] = channelMap[1]
-
-            # Check for message
-            if "Records" in event:
-                logging.getLogger().info("has records")
-                for record in event["Records"]:
-                    if "EventSource" in record and record["EventSource"] == "aws:sns":
-                        subject = record["Sns"]["Subject"]
-                        msg = record["Sns"]["Message"]
-
-                        attachment = [{"title": subject, "text": msg}]
-
-                        rocketChatMessage = {
-                            "text": "*AWS Notification*",
-                            "attachments": attachment,
-                        }
-                        teamsMessage = {
-                            "@type": "MessageCard",
-                            "@context": "http://schema.org/extensions",
-                            "themeColor": "0076D7",
-                            "summary": "AWS Alert",
-                            "sections": [{
-                                "activityTitle": "AWS Notification",
-                                "activityImage": "https://logos-world.net/wp-content/uploads/2021/08/Amazon-Web-Services-AWS-Logo.png",
-                                "facts": [{
-                                        "name": "Title",
-                                        "value": subject
-                                }, {
-                                    "name": "Message",
-                                    "value": msg
-                                }],
-                                "markdown": True
-                            }]
-                        }
-
-                        if subject.startswith("AWS Budgets:"):
-                            webHookUrlName = "BUDGET"
-                            # [1] = "BUDGET_TEAMS"
-                        else:
-                            webHookUrlName = "GENERAL"
-
-                        for key, value in webHookUrlName.items():
-                            if webHookUrlName in key:
-
-                                if "rocketchat" in webHookUrlLookup:
-                                    response = requests.post(
-                                        webHookUrlLookup[key],
-                                        data=json.dumps(rocketChatMessage),
-                                        headers={
-                                            "Content-Type": "application/json"},
-                                    )
-                                if "teams" in webHookUrlLookup:
-                                    response = requests.post(
-                                        webHookUrlLookup[key],
-                                        data=json.dumps(teamsMessage),
-                                        headers={
-                                            "Content-Type": "application/json"},
-                                    )
-                            else:
-                                logging.getLogger().info(
-                                    'configuration "{}" not in mapping. Skipping.'.format(
-                                        webHookUrlName
-                                    )
-                                )
-                    else:
-                        logging.getLogger().info(
-                            'Unknown event source "{}" not in mapping. Skipping.'.format(
-                                record["EventSource"]
-                            )
-                        )
-
-            else:
-                logging.getLogger().info("has security hub findings")
-                # Security Hub Findings
-                response = client.list_accounts_for_parent(ParentId=ParentId)
-                response1 = client.list_accounts_for_parent(ParentId=ParentId1)
-
-                core_accounts = []
-
-                for acc in response["Accounts"]:
-                    core_accounts.append(acc["Id"])
-                for acc in response1["Accounts"]:
-                    core_accounts.append(acc["Id"])
-
-                for finding in event["detail"]["findings"]:
-
-                    responseData = ""
-
-                    consoleUrl = (
-                        "https://{region}.console.aws.amazon.com/securityhub".format(
-                            region=os.getenv("AWS_REGION")
-                        )
-                    )
-                    findingTitle = finding["Title"]
-                    findingType = finding["Types"][0]
-                    findingDescription = finding["Description"]
-                    findingTime = finding["UpdatedAt"]
-                    lastObservedAt = finding.get("LastObservedAt", None)
-                    account = finding["AwsAccountId"]
-                    region = finding["Resources"][0].get("Region", None)
-                    resourceType = finding["Resources"][0]["Type"]
-                    messageId = finding["Id"]
-
-                    lastSeen = findingTime
-
-                    colour = "#7CD197"
-                    severity = ""
-                    
-                    if account in core_accounts:
-                        match = re.findall(r'arn:aws:\w+:.?:(\d{12})', findingDescription)
-                        if match:
-                            account_number = match[1]
-                            logging.getLogger().info(account_number)
-                            if account_number in core_accounts:
-                                    logging.getLogger().info("Case account number in core account")
-                                    accountType = "core"
-                            else:
-                                logging.getLogger().info("Case account number not core account")
-                                accountType = "workload"
-                        else:
-                            logging.getLogger().info("Case arn no match")
-                            accountType = "core"
-                    else:
-                        logging.getLogger().info("case account id not in core account")
-                        accountType = "workload"
-
-                    severityNormalized = finding["Severity"]["Normalized"]
-
-                    if 1 <= severityNormalized and severityNormalized <= 39:
-                        severity = "LOW"
-                        colour = "#879596"
-                    elif 40 <= severityNormalized and severityNormalized <= 69:
-                        severity = "MEDIUM"
-                        colour = "#ed7211"
-                    elif 70 <= severityNormalized and severityNormalized <= 89:
-                        severity = "HIGH"
-                        colour = "#ed7211"
-                    elif 90 <= severityNormalized and severityNormalized <= 100:
-                        severity = "CRITICAL"
-                        colour = "#ff0209"
-                    else:
-                        severity = "INFORMATIONAL"
-                        colour = "#007cbc"
-
-                    findQuery = "search=Id%3D%255Coperator%255C%253AEQUALS%255C%253A{messageId}".format(
-                        messageId=urllib.parse.quote(messageId, safe="")
-                    )
-
-                    attachment = [
-                        {
-                            "title": findingTitle,
-                            "title_link": "{console}/home?region={region}#/findings?{findQuery}".format(
-                                console=consoleUrl, region=region, findQuery=findQuery
-                            ),
-                            "text": findingDescription,
-                            "color": colour,
-                            "ts": findingTime,
-                            "fields": [
-                                {"title": "Severity",
-                                    "value": severity, "short": True},
-                                {"title": "Region", "value": region, "short": True},
-                                {
-                                    "title": "Resource Type",
-                                    "value": resourceType,
-                                    "short": True,
-                                },
-                                {
-                                    "title": "Last Seen",
-                                    "value": lastObservedAt,
-                                    "short": True,
-                                },
-                                {
-                                    "title": "Finding Type",
-                                    "value": findingType,
-                                    "short": True,
-                                },
-                            ],
-                        }
-                    ]
-
-                    rocketChatMessage = {
-                        "text": "*AWS SecurityHub finding in {region} for Acct: {account}*".format(
-                            region=region, account=account
-                        ),
-                        "attachments": attachment,
-                    }
-                    teamsMessage = {
-                        "@type": "MessageCard",
-                        "@context": "http://schema.org/extensions",
-                        "themeColor": "0076D7",
-                        "summary": "{console}/home?region={region}#/findings?{findQuery}".format(
-                            console=consoleUrl, region=region, findQuery=findQuery
-                        ),
-                        "sections": [
-                            {
-                                "activityTitle": findingDescription,
-                                "activityImage": "https://logos-world.net/wp-content/uploads/2021/08/Amazon-Web-Services-AWS-Logo.png",
-                                "activitySubtitle": "*AWS SecurityHub finding in {region} for Acct: {account}*".format(
-                                    region=region, account=account
-                                ),
-                                "facts": [
-                                    {"name": "Resource Type",
-                                        "value": resourceType},
-                                    {"name": "Last Seen", "value": lastObservedAt},
-                                    {"name": "Severity", "value": severity},
-                                    {"name": "Region", "value": region},
-                                    {"name": "Finding Type", "value": findingType},
-                                ],
-                                "markdown": True,
-                            }
-                        ],
-                        "potentialAction": [
-                            {
-                                "@type": "OpenUri",
-                                "name": "Learn More",
-                                "targets": [
-                                    {
-                                        "os": "default",
-                                        "uri": "{console}/home?region={region}#/findings?{findQuery}".format(
-                                            console=consoleUrl,
-                                            region=region,
-                                            findQuery=findQuery,
-                                        ),
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                    for key, value in webHookUrlLookup.items():
-                        if accountType in key and severity in key:
-                            if "teams" in key:
-                                response = requests.post(
-                                    webHookUrlLookup["{0}".format(key)],
-                                    data=json.dumps(teamsMessage),
-                                    headers={
-                                        "Content-Type": "application/json"},
-                                )
-
-                            if "rocketchat" in key:
-                                requests.post(
-                                    webHookUrlLookup["{0}".format(key)],
-                                    data=json.dumps(rocketChatMessage),
-                                    headers={
-                                        "Content-Type": "application/json"},
-                                )
-
-                        else:
-                            logging.getLogger().info(
-                                'severity webhookInvocation "{}" not in mapping for key "{}". Skipping.'.format(
-                                    severity, key
-                                )
-                            )
-
-    except Exception as error:
-        logging.getLogger().error(error, exc_info=True)
-        responseStatus = "FAILED"
-        reason = str(error)
-        result = {"statusCode": "500", "body": {"message": reason}}
-
-    return json.dumps(result)
+    except Exception as exc:
+        logger.exception("Unhandled exception")
+        return {"statusCode": 500, "body": json.dumps({"error": str(exc)})}
