@@ -65,6 +65,7 @@ resource "null_resource" "install_dependencies" {
   # have changed since the last deployment with Terraform
   triggers = {
     dependencies_versions = filemd5("${local.lambda_src_path}/requirements.txt")
+    src_hash              = random_uuid.lambda_src_hash.result
 
   }
 }
@@ -101,8 +102,8 @@ resource "aws_lambda_function" "findings_to_teams_rocketchat" {
 
   environment {
     variables = {
-      LOG_LEVEL = var.LambdaEnvLogLevel,
-      core_account_ids = var.core_account_ids,
+      LOG_LEVEL             = var.LambdaEnvLogLevel,
+      core_account_ids      = var.core_account_ids,
       management_account_id = var.management_account_id
     }
   }

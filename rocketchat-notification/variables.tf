@@ -14,11 +14,11 @@ variable "LambdaTimeout" {
 }
 
 variable "core_account_ids" {
-  type    = string
+  type        = string
   description = "List of core account IDs to monitor for Security Hub findings"
 }
 
 variable "management_account_id" {
-  type    = string
+  type        = string
   description = "The AWS account ID of the management account"
 }
