@@ -127,6 +127,7 @@ resource "aws_cloudwatch_event_rule" "security_hub_findings_to_teams_rocketchat"
   ],
   "detail": {
       "findings": {
+          "Region": ["ca-central-1"],
           "Severity": {
               "Label": [
                  "HIGH", "CRITICAL"
