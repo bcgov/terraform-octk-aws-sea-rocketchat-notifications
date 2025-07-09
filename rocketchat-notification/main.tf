@@ -65,7 +65,7 @@ resource "null_resource" "install_dependencies" {
   # have changed since the last deployment with Terraform
   triggers = {
     dependencies_versions = filemd5("${local.lambda_src_path}/requirements.txt")
-    src_hash              = random_uuid.lambda_src_hash.result
+    source_code_hash              = random_uuid.lambda_src_hash.result
 
   }
 }
