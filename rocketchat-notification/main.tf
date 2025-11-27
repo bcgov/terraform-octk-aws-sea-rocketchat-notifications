@@ -91,10 +91,10 @@ data "archive_file" "lambda_source_package" {
 # Lambda
 resource "aws_lambda_function" "findings_to_teams_rocketchat" {
   filename         = data.archive_file.lambda_source_package.output_path
-  function_name    = "BCGOV_LZA-SecurityHubfindings-To-Rocketchat-Teams"
+  function_name    = "BCGOV_LZA-SecurityHubfindings-To-Teams"
   role             = aws_iam_role.security_hub_notifications_role.arn
   handler          = "index.handler"
-  description      = "Lambda Function to send security alerts to Rocketchat and Teams"
+  description      = "Lambda Function to send security alerts to Teams"
   runtime          = "python3.12"
   timeout          = var.LambdaTimeout
   source_code_hash = data.archive_file.lambda_source_package.output_base64sha256
@@ -113,7 +113,7 @@ resource "aws_lambda_function" "findings_to_teams_rocketchat" {
 
 # CloudWatch Events Rules
 resource "aws_cloudwatch_event_rule" "security_hub_findings_to_teams_rocketchat" {
-  name        = "BCGOV_LZA_SecurityHubFindingsToRocketchatTeams"
+  name        = "BCGOV_LZA_SecurityHubFindingsToTeams"
   description = "CloudWatchEvents Rule to enable SecurityHub Findings to Teams"
 
   event_pattern = <<EOF
@@ -147,7 +147,7 @@ EOF
 
 resource "aws_cloudwatch_event_target" "findings_to_teams_rocketchat" {
   rule      = aws_cloudwatch_event_rule.security_hub_findings_to_teams_rocketchat.name
-  target_id = "FindingsToRocketchatTeams"
+  target_id = "FindingsToTeams"
   arn       = aws_lambda_function.findings_to_teams_rocketchat.arn
 }
 

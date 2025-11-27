@@ -1,4 +1,4 @@
-# Secuirty Hub findings to teams and rocketchat
+# Secuirty Hub findings to teams
 
 import json
 import logging
@@ -63,9 +63,9 @@ def post(url: str, payload: dict):
     requests.post(url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=5)
 
 
-def send_message(acct_type: str, teams_msg: dict, rocket_msg: dict):
+def send_message(acct_type: str, teams_msg: dict):
     key_prefix = acct_type.upper()
-    pairs = [("TEAMS", teams_msg), ("ROCKETCHAT", rocket_msg)]
+    pairs = [("TEAMS", teams_msg)]
     for channel, payload in pairs:
         url = WEBHOOKS.get(f"{channel}_{key_prefix}")
         if url:
@@ -81,26 +81,6 @@ def build_payloads(finding: dict, label: str, colour: str) -> tuple[dict, dict]:
     console_base = f"https://{AWS_REGION}.console.aws.amazon.com/securityhub"
     query = f"search=Id%3D%255Coperator%255C%253AEQUALS%255C%253A{urllib.parse.quote(fid, safe='')}"
     console_link = f"{console_base}/home?region={region}#/findings?{query}"
-
-    rocket_attach = [{
-        "title": finding["Title"],
-        "title_link": console_link,
-        "text": finding["Description"],
-        "color": colour,
-        "ts": finding["UpdatedAt"],
-        "fields": [
-            {"title": "Severity",      "value": label,   "short": True},
-            {"title": "Region",        "value": region,  "short": True},
-            {"title": "Resource Type", "value": finding["Resources"][0]["Type"], "short": True},
-            {"title": "Last Seen",     "value": finding["UpdatedAt"],              "short": True},
-            {"title": "Finding Type",  "value": finding["Types"][0],               "short": True},
-        ],
-    }]
-    rocket = {
-        "text": f"*AWS SecurityHub finding in {region} for Acct: {account}*",
-        "attachments": rocket_attach,
-    }
-
     teams = {
         "@type": "MessageCard",
         "@context": "http://schema.org/extensions",
@@ -125,7 +105,7 @@ def build_payloads(finding: dict, label: str, colour: str) -> tuple[dict, dict]:
             "targets": [{"os": "default", "uri": console_link}],
         }],
     }
-    return rocket, teams
+    return teams
 
 def process_findings(detail: dict, logger: logging.LoggerAdapter):
     findings = detail["findings"]
@@ -139,8 +119,8 @@ def process_findings(detail: dict, logger: logging.LoggerAdapter):
             fid, label, finding["AwsAccountId"], acct_type_val.upper()
         )
 
-        rocket, teams = build_payloads(finding, label, colour)
-        send_message(acct_type_val, teams, rocket)
+        teams = build_payloads(finding, label, colour)
+        send_message(acct_type_val, teams)
 
 def handler(event, context):
     logger = setup_logging(context.aws_request_id)
