@@ -1,7 +1,7 @@
 locals {
   //Put all common tags here
   common_tags = {
-    Project = "BCGOV_LZA_SecurityHub_Notifications"
+    Project = "BCGOV-LZA_SecurityHub_Notifications"
   }
   lambda_src_path = "./lambda"
 }
@@ -9,7 +9,7 @@ locals {
 data "aws_caller_identity" "current" {}
 
 resource "aws_iam_role" "security_hub_notifications_role" {
-  name               = "BCGOV_LZA_Security_Hub_Notifications_Role"
+  name               = "BCGOV-LZA_Security_Hub_Notifications_Role"
   path               = "/service-role/"
   assume_role_policy = <<EOF
 {
@@ -91,7 +91,7 @@ data "archive_file" "lambda_source_package" {
 # Lambda
 resource "aws_lambda_function" "findings_to_teams_rocketchat" {
   filename         = data.archive_file.lambda_source_package.output_path
-  function_name    = "BCGOV_LZA-SecurityHubfindings-To-Teams"
+  function_name    = "BCGOV-LZA-SecurityHubfindings-To-Teams"
   role             = aws_iam_role.security_hub_notifications_role.arn
   handler          = "index.handler"
   description      = "Lambda Function to send security alerts to Teams"
@@ -113,7 +113,7 @@ resource "aws_lambda_function" "findings_to_teams_rocketchat" {
 
 # CloudWatch Events Rules
 resource "aws_cloudwatch_event_rule" "security_hub_findings_to_teams_rocketchat" {
-  name        = "BCGOV_LZA_SecurityHubFindingsToTeams"
+  name        = "BCGOV-LZA_SecurityHubFindingsToTeams"
   description = "CloudWatchEvents Rule to enable SecurityHub Findings to Teams"
 
   event_pattern = <<EOF
